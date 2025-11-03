@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+.venv3*/
+.venv311/
+venv/
+env/
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Streamlit/Cache
+.streamlit/
+.cache/
+
+# Local data outputs
+data/outputs/*
+!data/outputs/.gitkeep
+
+# Models or large artifacts (optional local storage)
+models/*
+!models/.gitkeep
+
+# Logs
+*.log
+
+# Env files
+.env
+.env.*

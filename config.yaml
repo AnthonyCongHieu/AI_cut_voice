@@ -1,8 +1,8 @@
 # FPS và ngắt nghỉ
 frame_rate: 30
 silence_after_period_frames: 24            # '.' = 24 frames ≈ 800ms
-silence_other_punct_frames_min: 5          # dấu khác 5–7 frames (chỉ khi phù hợp)
-silence_other_punct_frames_max: 7
+silence_other_punct_frames_min: 3          # dấu khác 3–5 frames
+silence_other_punct_frames_max: 5
 
 # Cắt/ghép an toàn
 pre_pad_ms: 40

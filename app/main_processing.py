@@ -5,6 +5,11 @@ import json
 import sys
 from pathlib import Path
 
+# Ensure project root is on sys.path so `app.*` imports work when running from app/ directory
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from app.utils import read_yaml, ensure_dir
 from app.text_normalize import extract_text_from_docx, normalize_text
 from app.aligner import align_words, save_aligned_json
