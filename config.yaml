@@ -1,0 +1,29 @@
+# FPS và ngắt nghỉ
+frame_rate: 30
+silence_after_period_frames: 24            # '.' = 24 frames ≈ 800ms
+silence_other_punct_frames_min: 5          # dấu khác 5–7 frames (chỉ khi phù hợp)
+silence_other_punct_frames_max: 7
+
+# Cắt/ghép an toàn
+pre_pad_ms: 40
+post_pad_ms: 80
+snap_window_ms: 25        # quét ±25ms tìm valley năng lượng
+snap_step_ms: 5
+overlap_crossfade_ms: 25
+
+# Gom CỤM
+gap_merge_ms: 180         # chỉ dùng khi không tách theo '.'
+
+# Chính sách ngắt sau dấu phẩy & dấu khác
+comma_soft_break_min_gap_ms: 250           # nếu natural gap < ngưỡng này mới cân nhắc chèn 5–7 frames
+min_gap_between_groups_ms: 60              # nếu ngắt nhỏ hơn ngưỡng → bỏ
+default_silence_ms_between_groups: 120     # fallback nếu cần
+
+# Export
+export_bitrate: "192k"
+export_format: "mp3"
+
+# Mô hình & thiết bị
+language: "vi"
+whisper_model: "large-v3"  # model mạnh nhất
+device: "auto"             # "cuda" | "cpu" | "auto"
