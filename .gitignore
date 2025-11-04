@@ -1,40 +1,58 @@
-# Python
+# Python bytecode and cache
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
+*$py.class
+.cache/
 .pytest_cache/
 .mypy_cache/
-.ruff_cache/
+.pytype/
+.pyre/
 
-# Virtual envs
+# Virtual environments
 .venv/
-.venv3*/
 .venv311/
 venv/
+ENV/
 env/
 
-# Editors/OS
+# Build/dist artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Coverage/reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Streamlit
+.streamlit/
+
+# IDE/editor settings
 .vscode/
 .idea/
+*.code-workspace
+
+# OS-specific
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Streamlit/Cache
-.streamlit/
-.cache/
+# Logs and temp
+*.log
+*.tmp
+tmp/
+temp/
 
-# Local data outputs
+# Project-specific generated files
+tools/
+_tmp_input_audio/
+
+# Keep only gitkeep in these tracked folders
 data/outputs/*
 !data/outputs/.gitkeep
-
-# Models or large artifacts (optional local storage)
 models/*
 !models/.gitkeep
 
-# Logs
-*.log
-
-# Env files
-.env
-.env.*
