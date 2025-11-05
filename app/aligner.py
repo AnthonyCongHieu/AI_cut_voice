@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, List, Dict
 
 import torch
+from pydub.utils import which
 import stable_whisper
 
 
@@ -72,18 +73,41 @@ def align_words(
 
     Returns list of dict: {"word": str, "start": float, "end": float} in seconds.
     """
+    # Preflight checks: file existence and ffmpeg availability (ffprobe/ffmpeg used by Whisper I/O)
+    p = Path(audio_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    if which("ffmpeg") is None:
+        raise RuntimeError(
+            "FFmpeg not found in PATH. Install a static build (Windows Essentials) from https://www.gyan.dev/ffmpeg/builds/ and add its 'bin' folder to PATH, or run scripts/activate_with_ffmpeg.ps1 before launching."
+        )
+
     used_device = _select_device(device)
+    print(f"[aligner] Using device: {used_device}")
     model = load_model_smart(model_name, device)
     # Bias with initial_prompt if available. condition_on_previous_text=False for determinism.
-    result = model.transcribe(
-        audio_path,
-        language=language,
-        word_timestamps=True,
-        initial_prompt=(transcript or None),
-        condition_on_previous_text=False,
-        vad=True,
-        fp16=(used_device == "cuda"),
-    )
+    try:
+        result = model.transcribe(
+            audio_path,
+            language=language,
+            word_timestamps=True,
+            initial_prompt=(transcript or None),
+            condition_on_previous_text=False,
+            vad=True,
+            fp16=(used_device == "cuda"),
+        )
+    except FileNotFoundError as e:
+        # Common on Windows when ffmpeg is missing; surface clear guidance
+        raise RuntimeError(
+            f"Audio decode failed (possibly missing FFmpeg). Original error: {e}.\n"
+            "Install FFmpeg and ensure ffmpeg.exe is in PATH, or run scripts/activate_with_ffmpeg.ps1."
+        )
+    except OSError as e:
+        if getattr(e, "winerror", None) == 2:
+            raise RuntimeError(
+                "[WinError 2] External tool not found. FFmpeg is likely missing. Install from https://www.gyan.dev/ffmpeg/builds/ and add to PATH, or run scripts/activate_with_ffmpeg.ps1."
+            )
+        raise
 
     words: List[Dict[str, float]] = []
     for seg in result.segments:

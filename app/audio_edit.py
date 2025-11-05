@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import random
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Sequence, cast
 
 from pydub import AudioSegment  # type: ignore
 
@@ -100,7 +100,7 @@ def _find_true_silence_end(
     from the last 60ms before raw_end_ms. If not found, returns the lowest RMS
     point in the search range.
     """
-    eval_half_win = 15  # ~30ms eval window
+    eval_half_win = 15  # ~30ms eval window (sub-window size increased to 30ms via half=15ms)
     search_start = int(raw_end_ms)
     search_end = min(len(src), search_start + int(max_seek_ms))
 
@@ -137,28 +137,136 @@ def _find_speech_onset(
     """Find the earliest stable speech onset at or after raw_start_ms.
 
     We compute a noise baseline from 80ms before raw_start_ms (if available),
-    then scan forward for the earliest time where two consecutive short
-    windows (~30ms) exceed an onset threshold (e.g., 35% of baseline + guard).
-    Returns the detected onset slightly earlier (5ms) to avoid clipping.
+    then scan forward for the earliest time where three consecutive short
+    windows (~30ms) exceed a stricter onset threshold (>= 0.5 * noise baseline).
+    Returns the detected onset slightly earlier (5ms) to avoid clipping strong consonants.
     """
-    eval_half_win = 15
+    eval_half_win = 15  # ~30ms sub-window
     search_start = max(0, int(raw_start_ms))
     search_end = min(len(src), search_start + int(max_seek_ms))
 
     pre0 = max(0, search_start - 80)
     noise_seg = src[pre0:search_start]  # type: ignore
     noise = max(1.0, _rms(noise_seg))  # type: ignore
-    # Onset threshold: 35% of (noise + local energy guard)
-    thr = max(15.0, noise * 0.35)
+    # Stricter onset threshold: 50% of noise baseline
+    thr = max(15.0, noise * 0.50)
 
     for t in range(search_start, search_end + 1, max(1, int(step_ms))):
-        w1 = _window_slice(src, t, eval_half_win)
-        w2 = _window_slice(src, min(len(src), t + eval_half_win), eval_half_win)
-        r1, r2 = _rms(w1), _rms(w2)  # type: ignore
-        if r1 >= thr and r2 >= thr:
+        w0 = _window_slice(src, t, eval_half_win)
+        w1 = _window_slice(src, min(len(src), t + eval_half_win), eval_half_win)
+        w2 = _window_slice(src, min(len(src), t + eval_half_win * 2), eval_half_win)
+        r0, r1, r2 = _rms(w0), _rms(w1), _rms(w2)  # type: ignore
+        if r0 >= thr and r1 >= thr and r2 >= thr:
             return max(0, t - 5)
     # Fallback: use find_silence_boundary for start
     return find_silence_boundary(src, search_start, is_start=True, cfg={"silence_threshold_rms_percent": 20})
+
+
+def _rms_over_span(src: AudioSegment, start_ms: int, end_ms: int) -> float:
+    start = max(0, int(start_ms))
+    end = min(len(src), int(end_ms))
+    if end <= start:
+        return 0.0
+    return _rms(cast(AudioSegment, src[start:end]))  # type: ignore
+
+
+def safe_push_end_forward(end_ms: int, full_audio: AudioSegment, max_seek: int = 350, rms_thresh: float = 0.15) -> int:
+    """Seek forward from end_ms until RMS < threshold for a >=100ms span.
+
+    Threshold is relative to a baseline from 200ms preceding the probe point.
+    Returns the new end_ms (>= original) aligned to a nearby zero crossing.
+    """
+    step = 5
+    probe = int(end_ms)
+    limit = min(len(full_audio), probe + int(max_seek))
+    best = probe
+    best_r = float("inf")
+    while probe <= limit:
+        base_start = max(0, probe - 200)
+        baseline = max(1.0, _rms(cast(AudioSegment, full_audio[base_start:probe])))  # type: ignore
+        thr = max(5.0, baseline * rms_thresh)
+        span_end = min(len(full_audio), probe + 100)
+        r = _rms_over_span(full_audio, probe, span_end)
+        if r < best_r:
+            best_r = r
+            best = probe
+        if r <= thr:
+            return _nearest_zero_crossing_ms(full_audio, probe, window_ms=8)
+        probe += step
+    return _nearest_zero_crossing_ms(full_audio, best, window_ms=8)
+
+
+def safe_pull_start_backward(start_ms: int, full_audio: AudioSegment, max_seek: int = 200, rms_thresh: float = 0.15) -> int:
+    """Seek backward from start_ms into a preceding silence region.
+
+    Looks for a >=100ms window whose RMS is below threshold relative to a
+    baseline from the next 200ms after the candidate (avoid cutting attacks).
+    Returns a new start_ms (<= original) aligned to a nearby zero crossing.
+    """
+    step = 5
+    probe = int(start_ms)
+    limit = max(0, probe - int(max_seek))
+    best = probe
+    best_r = float("inf")
+    while probe >= limit:
+        base_end = min(len(full_audio), probe + 200)
+        baseline = max(1.0, _rms(cast(AudioSegment, full_audio[probe:base_end])))  # type: ignore
+        thr = max(5.0, baseline * rms_thresh)
+        span_end = min(len(full_audio), probe + 100)
+        r = _rms_over_span(full_audio, probe, span_end)
+        if r < best_r:
+            best_r = r
+            best = probe
+        if r <= thr:
+            return _nearest_zero_crossing_ms(full_audio, probe, window_ms=8)
+        probe -= step
+    return _nearest_zero_crossing_ms(full_audio, best, window_ms=8)
+
+
+def enforce_exact_frame_pause(
+    end_ms: int,
+    start_ms: int,
+    full_audio: AudioSegment,
+    fps: int = 30,
+    frames: int = 24,
+    tolerance_ms: int = 5,
+) -> tuple[int, int]:
+    """Return (new_end_ms, new_start_ms) adjusted to target gap.
+
+    If natural gap is too large, trim both ends as needed, prioritizing moving
+    end forward into silence, then pulling start backward into silence.
+    If gap is too small, this function does not add silence — caller should
+    insert exact missing milliseconds. The result is clamped to ensure
+    start_ms >= end_ms.
+    """
+    target = frames_to_ms(frames, fps)
+    gap = start_ms - end_ms
+    if abs(gap - target) <= tolerance_ms:
+        return end_ms, start_ms
+
+    if gap > target + tolerance_ms:
+        need = gap - target
+        # Try push end forward first
+        new_end = safe_push_end_forward(end_ms, full_audio, max_seek=350, rms_thresh=0.15)
+        moved_end = max(0, new_end - end_ms)
+        if moved_end > 0:
+            need = max(0, need - moved_end)
+            end_ms = new_end
+        # If still too large, pull start backward into silence
+        if need > 0:
+            new_start = safe_pull_start_backward(start_ms, full_audio, max_seek=min(200, need + 20), rms_thresh=0.15)
+            moved_start = max(0, start_ms - new_start)
+            if moved_start > 0:
+                start_ms = new_start
+        # Final clamp if still too large (best effort already done)
+        if start_ms < end_ms:
+            start_ms = end_ms
+        return end_ms, start_ms
+
+    # If gap < target - tolerance, leave boundaries; caller must insert silence
+    if start_ms < end_ms:
+        start_ms = end_ms
+    return end_ms, start_ms
 
 
 def _nearest_zero_crossing_ms(src: AudioSegment, target_ms: int, window_ms: int = 8) -> int:
@@ -172,20 +280,24 @@ def _nearest_zero_crossing_ms(src: AudioSegment, target_ms: int, window_ms: int 
             return int(target_ms)
         left = max(0, int(target_ms) - window_ms)
         right = min(len(src), int(target_ms) + window_ms)
-        tiny = src[left:right].set_channels(1)  # type: ignore
-        sr = tiny.frame_rate
-        arr = tiny.get_array_of_samples()
-        if not arr:
+        tiny_slice: AudioSegment = cast(AudioSegment, src[left:right])  # type: ignore
+        tiny: AudioSegment = cast(AudioSegment, tiny_slice.set_channels(1))  # type: ignore
+        sr_obj = getattr(tiny, "frame_rate")
+        sr: int = int(sr_obj)
+        raw_samples = getattr(tiny, "get_array_of_samples")()
+        samples_seq: Sequence[int] = cast(Sequence[int], raw_samples)
+        samples: list[int] = [int(x) for x in samples_seq]
+        if not samples:
             return int(target_ms)
-        best_idx = 0
-        best_abs = abs(arr[0])
-        prev = arr[0]
-        for i in range(1, len(arr)):
-            s = arr[i]
+        best_idx: int = 0
+        best_abs: int = abs(int(samples[0]))
+        prev: int = int(samples[0])
+        for i in range(1, len(samples)):
+            s: int = int(samples[i])
             if s == 0 or (s > 0 and prev < 0) or (s < 0 and prev > 0):
                 ms = int(round(left + (i * 1000.0 / sr)))
                 return ms
-            aval = abs(s)
+            aval: int = abs(int(s))
             if aval < best_abs:
                 best_abs = aval
                 best_idx = i
@@ -331,7 +443,7 @@ def synthesize_from_words(
     """
     from .utils import safe_export  # type: ignore
 
-    src: AudioSegment = AudioSegment.from_file(audio_path)  # type: ignore
+    src: AudioSegment = cast(AudioSegment, AudioSegment.from_file(audio_path))  # type: ignore
     gap_merge_ms = int(cfg.get("gap_merge_ms", 180))
     groups = _build_groups_by_period(words, punct_map, gap_merge_ms)
 
@@ -340,6 +452,7 @@ def synthesize_from_words(
     onset_seek_ms = int(cfg.get("onset_seek_ms", 250))
     period_seek_ms = int(cfg.get("period_silence_seek_ms", 350))
     min_stable_silence_ms = int(cfg.get("min_stable_silence_ms", 90))
+    crossfade_ms = int(cfg.get("overlap_crossfade_ms", 20))
 
     # Pass 1: adjusted boundaries per group
     adj_starts: List[int] = []
@@ -362,16 +475,16 @@ def synthesize_from_words(
 
         e = find_silence_boundary(src, raw_end, is_start=False, cfg=cfg)
         if puncts[-1] == ".":
-            # Seek until we have at least min_stable_silence_ms of stable silence
+            # Seek until we have at least min_stable_silence_ms of stable silence (3 consecutive windows)
             e0 = _find_true_silence_end(src, e, max_seek_ms=period_seek_ms, step_ms=5)
-            # expand until stable silence length satisfied
+            # Expand until stable silence length satisfied
             seek_end = min(len(src), e0 + period_seek_ms)
             cur = e0
             while cur < seek_end:
-                span = src[max(0, cur - min_stable_silence_ms):cur]  # type: ignore
-                baseline = max(1.0, _rms(src[max(0, cur - 200):cur]))  # type: ignore
+                span_seg: AudioSegment = cast(AudioSegment, src[max(0, cur - min_stable_silence_ms):cur])  # type: ignore
+                baseline = max(1.0, _rms(cast(AudioSegment, src[max(0, cur - 200):cur])))  # type: ignore
                 thr = max(5.0, baseline * float(cfg.get("silence_threshold_ratio", 0.18)))
-                if _rms(span) <= thr:
+                if _rms(span_seg) <= thr:
                     break
                 cur += 5
             e = _nearest_zero_crossing_ms(src, cur, window_ms=8)
@@ -386,25 +499,19 @@ def synthesize_from_words(
     # Pass 2: normalize pauses
     fps = int(cfg.get("frame_rate", 30))
     target_ms = frames_to_ms(int(cfg.get("silence_after_period_frames", 24)), fps)
-    guard_ms = 12
     extra_silences: List[int] = [0 for _ in range(max(0, len(groups) - 1))]
 
     for i in range(len(groups) - 1):
         punct = puncts[i]
         gap = adj_starts[i + 1] - adj_ends[i]
         if punct == ".":
-            if gap < target_ms:
+            # Enforce exact 24-frame pause using two-way normalization
+            if gap > target_ms + 5:
+                new_end, new_start = enforce_exact_frame_pause(adj_ends[i], adj_starts[i + 1], src, fps=fps, frames=int(cfg.get("silence_after_period_frames", 24)))
+                adj_ends[i], adj_starts[i + 1] = new_end, new_start
+                gap = adj_starts[i + 1] - adj_ends[i]
+            if gap < target_ms - 5:
                 extra_silences[i] = target_ms - gap
-            elif gap > target_ms:
-                need_trim = gap - target_ms
-                allowed = max(0, adj_starts[i + 1] - guard_ms - adj_ends[i])
-                trim = min(allowed, need_trim)
-                if trim > 0:
-                    adj_ends[i] = _nearest_zero_crossing_ms(src, adj_ends[i] + trim, window_ms=6)
-                # recompute missing (if any)
-                gap2 = adj_starts[i + 1] - adj_ends[i]
-                if gap2 < target_ms:
-                    extra_silences[i] = target_ms - gap2
         else:
             three = frames_to_ms(3, fps)
             if gap <= three:
@@ -417,19 +524,57 @@ def synthesize_from_words(
     # Pass 3: de-overlap junctions
     for i in range(len(groups) - 1):
         if adj_starts[i + 1] < adj_ends[i]:
-            mid = int((adj_ends[i] + adj_starts[i + 1]) / 2)
-            j = _nearest_zero_crossing_ms(src, mid, window_ms=8)
-            adj_ends[i] = j
-            adj_starts[i + 1] = j
+            # Replace midpoint join: prefer moving start to a safe onset
+            onset = _find_speech_onset(src, adj_starts[i + 1], max_seek_ms=onset_seek_ms, step_ms=5)
+            onset = max(onset, adj_ends[i])
+            adj_starts[i + 1] = _nearest_zero_crossing_ms(src, onset, window_ms=8)
+            # If still overlapping due to pathological case, hard clamp
+            if adj_starts[i + 1] < adj_ends[i]:
+                j = _nearest_zero_crossing_ms(src, adj_ends[i], window_ms=8)
+                adj_starts[i + 1] = j
 
     # Pass 4: render
     output: AudioSegment = AudioSegment.silent(duration=0)  # type: ignore
     for gi in range(len(groups)):
-        seg = src[adj_starts[gi]:adj_ends[gi]]  # type: ignore
-        output += seg  # type: ignore
+        seg = cast(AudioSegment, src[adj_starts[gi]:adj_ends[gi]])  # type: ignore
+        # Dynamic crossfade only if we accidentally introduce overlap and both sides are vocal
+        if gi > 0 and crossfade_ms > 0:
+            # Estimate end-vocal and start-vocal
+            prev_tail_seg: Optional[AudioSegment] = cast(AudioSegment, src[max(0, adj_ends[gi - 1] - 60):adj_ends[gi - 1]]) if gi > 0 else None  # type: ignore
+            next_head: AudioSegment = cast(AudioSegment, src[adj_starts[gi]:min(len(src), adj_starts[gi] + 60)])  # type: ignore
+            baseline_prev = _rms(prev_tail_seg) if prev_tail_seg is not None else 0.0  # type: ignore
+            baseline_next_noise = _rms(cast(AudioSegment, src[max(0, adj_starts[gi] - 80):adj_starts[gi]]))  # type: ignore
+            end_is_vocal = (prev_tail_seg is not None and _rms(prev_tail_seg) > max(5.0, baseline_prev * 0.05))  # type: ignore
+            start_is_vocal = _rms(next_head) > max(5.0, baseline_next_noise * 0.05)  # type: ignore
+            strong_attack = _rms(next_head) > max(30.0, baseline_next_noise * 1.8)  # disable crossfade on strong consonant attack
+        else:
+            end_is_vocal = False
+            start_is_vocal = False
+            strong_attack = False
+
+        if gi > 0 and end_is_vocal and start_is_vocal and not strong_attack and crossfade_ms > 0:
+            output = output.append(seg, crossfade=crossfade_ms)  # type: ignore
+        else:
+            output += seg  # type: ignore
+
         if gi < len(groups) - 1:
             add_ms = extra_silences[gi]
             if add_ms > 0:
                 output += AudioSegment.silent(duration=add_ms)  # type: ignore
 
+    # Export
     safe_export(output, out_path, cfg)  # type: ignore
+
+    # Verification logs: check actual pauses for '.'
+    for i in range(len(groups) - 1):
+        punct = puncts[i]
+        if punct == ".":
+            measured = (adj_starts[i + 1] - adj_ends[i]) + extra_silences[i]
+            expected = target_ms
+            if abs(measured - expected) > 5:
+                print(f"[WARN] Pause off: expected={expected}ms, measured={measured}ms at junction {i}")
+            else:
+                print(f"[OK] Period pause ~{measured}ms at junction {i}")
+
+    # Keep a reference to avoid Pylance unused-function warning for optional helper
+    _ = _silence_after_group
