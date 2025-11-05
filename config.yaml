@@ -6,10 +6,10 @@ silence_other_punct_frames_max: 5
 silence_threshold_rms_percent: 20          # Threshold for silence boundary snapping (20% of baseline RMS)
 
 # Cắt/ghép an toàn
-pre_pad_ms: 40
-post_pad_ms: 80
-snap_window_ms: 25        # quét ±25ms tìm valley năng lượng
-snap_step_ms: 5
+pre_pad_ms: 60            # tăng đệm đầu để không hụt onset
+post_pad_ms: 120          # tăng đệm đuôi để bảo vệ phụ âm cuối
+snap_window_ms: 15        # cửa sổ snap nhỏ để tránh trôi quá xa
+snap_step_ms: 3           # bước nhỏ hơn cho độ chính xác cao
 overlap_crossfade_ms: 25
 
 # Gom CỤM
@@ -22,9 +22,15 @@ default_silence_ms_between_groups: 120     # fallback nếu cần
 
 # Export
 export_bitrate: "192k"
-export_format: "mp3"
+export_format: "wav"
 
 # Mô hình & thiết bị
 language: "vi"
 whisper_model: "large-v3"  # model mạnh nhất
-device: "auto"             # "cuda" | "cpu" | "auto"
+device: "cuda"             # "cuda" | "cpu" | "auto"
+
+# Tìm điểm hết sóng/onset (nâng độ an toàn)
+period_silence_seek_ms: 700   # ưu tiên chính xác sau dấu chấm (sâu nhất)
+onset_seek_ms: 400            # bắt đầu câu sau chắc chắn
+min_stable_silence_ms: 140    # yêu cầu im lặng bền vững trước khi cắt
+silence_threshold_ratio: 0.15 # ngưỡng RMS động chặt nhất

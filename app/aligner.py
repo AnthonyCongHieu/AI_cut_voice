@@ -72,6 +72,7 @@ def align_words(
 
     Returns list of dict: {"word": str, "start": float, "end": float} in seconds.
     """
+    used_device = _select_device(device)
     model = load_model_smart(model_name, device)
     # Bias with initial_prompt if available. condition_on_previous_text=False for determinism.
     result = model.transcribe(
@@ -81,6 +82,7 @@ def align_words(
         initial_prompt=(transcript or None),
         condition_on_previous_text=False,
         vad=True,
+        fp16=(used_device == "cuda"),
     )
 
     words: List[Dict[str, float]] = []
@@ -120,4 +122,3 @@ def save_aligned_json(words: List[Dict[str, float]], out_path: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(words, f, ensure_ascii=False, indent=2)
-

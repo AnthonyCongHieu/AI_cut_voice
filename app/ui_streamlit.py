@@ -129,7 +129,8 @@ if run:
                 st.warning("Không align được từ nào.")
             else:
                 punct_map = build_punctuation_indices(transcript, words)
-                out_audio_path = Path("data/outputs/output.mp3")
+                fmt = (cfg.get("export_format") or "wav").lower()
+                out_audio_path = Path(f"data/outputs/output.{fmt}")
                 out_audio_path.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     synthesize_from_words(str(tmp_audio_path), words, punct_map, cfg, str(out_audio_path))
