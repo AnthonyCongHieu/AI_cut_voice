@@ -50,6 +50,12 @@ temp/
 tools/
 _tmp_input_audio/
 
+# Unnecessary files
+_snippet.txt
+Cải tiến cắt âm thanh bằng AI.pdf
+data/input.docx
+data/input.wav
+
 # Keep only gitkeep in these tracked folders
 data/outputs/*
 !data/outputs/.gitkeep

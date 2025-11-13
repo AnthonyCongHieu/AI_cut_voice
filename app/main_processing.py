@@ -36,7 +36,7 @@ def detect_targets(words: list[dict], targets: list[str]) -> dict:
         targets: List of target strings, each can be single or multi-word.
 
     Returns:
-        Dict with target as key, list of {"start": float, "end": float} or "Not found".
+        Dict with target as key, list of merged {"start": float, "end": float} or "Not found".
     """
     results = {}
     for target in targets:
@@ -50,7 +50,29 @@ def detect_targets(words: list[dict], targets: list[str]) -> dict:
                 start = words[i]['start']
                 end = words[i+n-1]['end']
                 matches.append({"start": start, "end": end})
-        results[target] = matches if matches else "Not found"
+
+        if not matches:
+            results[target] = "Not found"
+            continue
+
+        # Sort matches by start time
+        matches.sort(key=lambda x: x['start'])
+
+        # Merge consecutive occurrences within 60 seconds
+        merged = []
+        current = matches[0]
+        for match in matches[1:]:
+            if current['end'] + 60 >= match['start']:
+                # Merge: extend the end
+                current['end'] = max(current['end'], match['end'])
+            else:
+                # No merge, add current to merged, start new current
+                merged.append(current)
+                current = match
+        # Add the last current
+        merged.append(current)
+
+        results[target] = merged
     return results
 
 

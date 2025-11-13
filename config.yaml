@@ -37,3 +37,10 @@ silence_threshold_ratio: 0.15 # ngưỡng RMS động chặt nhất
 
 # Targets for timestamp detection (list of strings, each can be single word or multi-word phrase)
 targets: ["Phó Lực Duy", "Tống Chí Kiên"]
+
+# Parallel Processing
+enable_parallel_processing: true
+parallel_threshold_minutes: 10
+chunk_duration_minutes: 15
+chunk_overlap_seconds: 0
+max_parallel_workers: 1

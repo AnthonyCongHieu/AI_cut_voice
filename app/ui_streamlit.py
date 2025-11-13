@@ -18,8 +18,12 @@ if str(_ROOT) not in sys.path:
 
 from app.utils import read_yaml
 from app.text_normalize import extract_text_from_docx, normalize_text
-from app.aligner import align_words
+from app.aligner import align_words, align_chunk, load_model_smart
 from app.main_processing import detect_targets, seconds_to_hhmmss
+from app.audio_chunking import split_audio_into_chunks
+import concurrent.futures
+import tempfile
+import os
 
 
 st.set_page_config(page_title="Voice Aligner", layout="centered")
@@ -42,6 +46,12 @@ if 'aligned_words' not in st.session_state:
     st.session_state.aligned_words = []
 if 'processing_error' not in st.session_state:
     st.session_state.processing_error = None
+if 'parallel_mode' not in st.session_state:
+    st.session_state.parallel_mode = False
+if 'chunk_progresses' not in st.session_state:
+    st.session_state.chunk_progresses = []
+if 'chunk_placeholders' not in st.session_state:
+    st.session_state.chunk_placeholders = []
 
 def get_estimate_multiplier(model: str) -> float:
     """Get processing time multiplier based on model (real time * multiplier)."""
@@ -54,16 +64,51 @@ def get_estimate_multiplier(model: str) -> float:
     }
     return estimates.get(model, 4.0)
 
-def process_alignment(audio_path: str, transcript: str, cfg: dict, result_queue: queue.Queue):
+def process_alignment(audio_path: str, transcript: str, cfg: dict, result_queue: queue.Queue, progress_queue: queue.Queue = None, parallel_mode: bool = False, chunks=None, offsets=None, temp_files=None):
     """Run alignment in a separate thread."""
     try:
-        words = align_words(
-            audio_path,
-            transcript,
-            language=cfg.get("language", "vi"),
-            model_name=cfg.get("whisper_model", "large-v3"),
-            device=cfg.get("device", "auto"),
-        )
+        if parallel_mode:
+            # Parallel processing
+            word_lists = []
+            model = load_model_smart(cfg.get("whisper_model", "large-v3"), cfg.get("device", "auto"))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=cfg.get("max_parallel_workers", 3)) as executor:
+                futures = [
+                    executor.submit(
+                        align_chunk,
+                        temp_path,
+                        offset,
+                        transcript,
+                        model,
+                        cfg.get("language", "vi"),
+                    )
+                    for temp_path, offset in zip(temp_files, offsets)
+                ]
+                for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                    word_list = future.result()
+                    word_lists.append(word_list)
+                    if progress_queue:
+                        progress_queue.put({'chunk_id': i, 'progress': 1.0})
+            # Merge word lists
+            all_words = []
+            for word_list in word_lists:
+                all_words.extend(word_list)
+            all_words.sort(key=lambda w: w["start"])
+            # Clean up temp files
+            for temp_path in temp_files:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+            words = all_words
+        else:
+            # Single-threaded processing
+            words = align_words(
+                audio_path,
+                transcript,
+                language=cfg.get("language", "vi"),
+                model_name=cfg.get("whisper_model", "large-v3"),
+                device=cfg.get("device", "auto"),
+            )
         result_queue.put({'words': words, 'error': None})
     except Exception as e:
         result_queue.put({'words': None, 'error': str(e)})
@@ -205,6 +250,33 @@ if run:
 
         transcript = normalize_text(transcript, lang=cfg.get("language", "vi"))
 
+        # Check for parallel processing
+        cfg_full = _load_default_config()
+        cfg_full.update(cfg)  # merge with user overrides
+        parallel_threshold = cfg_full.get("parallel_threshold_minutes", 10) * 60
+        if cfg_full.get("enable_parallel_processing", False) and duration > parallel_threshold:
+            st.session_state.parallel_mode = True
+            chunk_duration_ms = cfg_full.get("chunk_duration_minutes", 5) * 60 * 1000
+            overlap_ms = cfg_full.get("chunk_overlap_seconds", 1) * 1000
+            chunks = split_audio_into_chunks(str(tmp_audio_path), chunk_duration_ms, overlap_ms)
+            temp_files = []
+            offsets = []
+            current_offset_ms = 0
+            for chunk in chunks:
+                temp_fd, temp_path = tempfile.mkstemp(suffix=".wav")
+                os.close(temp_fd)
+                chunk.export(temp_path, format="wav")
+                temp_files.append(temp_path)
+                offsets.append(current_offset_ms / 1000)
+                current_offset_ms += len(chunk) - overlap_ms
+            st.session_state.chunk_progresses = [0.0] * len(chunks)
+            st.session_state.chunk_placeholders = [st.empty() for _ in chunks]
+        else:
+            st.session_state.parallel_mode = False
+            chunks = None
+            offsets = None
+            temp_files = None
+
         # Estimate time
         multiplier = get_estimate_multiplier(cfg.get("whisper_model", "large-v3"))
         estimated_total = duration * multiplier
@@ -215,19 +287,34 @@ if run:
 
         # Start processing thread
         result_queue = queue.Queue()
-        thread = threading.Thread(target=process_alignment, args=(str(tmp_audio_path), transcript, cfg, result_queue))
+        progress_queue = queue.Queue()
+        thread = threading.Thread(target=process_alignment, args=(str(tmp_audio_path), transcript, cfg, result_queue, progress_queue, st.session_state.parallel_mode, chunks, offsets, temp_files))
         thread.start()
 
         # Progress display
-        progress_placeholder = st.empty()
+        if st.session_state.parallel_mode:
+            chunk_placeholders = st.session_state.chunk_placeholders
+            for i, placeholder in enumerate(chunk_placeholders):
+                placeholder.progress(st.session_state.chunk_progresses[i])
+                st.text(f"Chunk {i+1} Progress")
+        else:
+            progress_placeholder = st.empty()
         elapsed_placeholder = st.empty()
         remaining_placeholder = st.empty()
+        keep_alive_placeholder = st.empty()
 
         while st.session_state.processing:
             if st.session_state.cancel_requested:
                 st.session_state.processing = False
                 st.warning("Processing cancelled.")
                 break
+            # Check for progress updates
+            if st.session_state.parallel_mode:
+                while not progress_queue.empty():
+                    update = progress_queue.get()
+                    chunk_id = update['chunk_id']
+                    st.session_state.chunk_progresses[chunk_id] = update['progress']
+                    chunk_placeholders[chunk_id].progress(update['progress'])
             # Check for results from thread
             if not result_queue.empty():
                 result = result_queue.get()
@@ -241,9 +328,11 @@ if run:
             remaining = max(st.session_state.estimated_total - elapsed, 0)
             elapsed_hms = seconds_to_hhmmss(elapsed, st.session_state.estimated_total)
             remaining_hms = seconds_to_hhmmss(remaining, st.session_state.estimated_total)
-            progress_placeholder.progress(progress)
+            if not st.session_state.parallel_mode:
+                progress_placeholder.progress(progress)
             elapsed_placeholder.text(f"Elapsed: {elapsed_hms}")
             remaining_placeholder.text(f"Estimated remaining: {remaining_hms}")
+            keep_alive_placeholder.text(f"Processing... Last update: {time.strftime('%Y-%m-%d %H:%M:%S')}")
             time.sleep(1)
 
         # After processing
