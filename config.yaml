@@ -34,3 +34,6 @@ period_silence_seek_ms: 700   # ưu tiên chính xác sau dấu chấm (sâu nh�
 onset_seek_ms: 400            # bắt đầu câu sau chắc chắn
 min_stable_silence_ms: 140    # yêu cầu im lặng bền vững trước khi cắt
 silence_threshold_ratio: 0.15 # ngưỡng RMS động chặt nhất
+
+# Targets for timestamp detection (list of strings, each can be single word or multi-word phrase)
+targets: ["Phó Lực Duy", "Tống Chí Kiên"]

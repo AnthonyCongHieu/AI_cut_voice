@@ -1,0 +1,53 @@
+                prev_tail = cast(AudioSegment, src[max(0, ends[gi - 1] - 60):ends[gi - 1]])  # type: ignore
+                next_head = cast(AudioSegment, src[starts[gi]:min(len(src), starts[gi] + 60)])  # type: ignore
+                baseline_prev = _rms(prev_tail)
+                baseline_next_noise = _rms(cast(AudioSegment, src[max(0, starts[gi] - 80):starts[gi]]))  # type: ignore
+                end_is_voiced = _rms(prev_tail) > max(5.0, baseline_prev * 0.05)
+                start_is_voiced = _rms(next_head) > max(5.0, baseline_next_noise * 0.05)
+                strong_attack = _rms(next_head) > max(30.0, baseline_next_noise * 1.8)
+                if end_is_voiced and start_is_voiced and not strong_attack:
+                    output = output.append(seg, crossfade=crossfade_ms)  # type: ignore
+                else:
+                    output += seg  # type: ignore
+            else:
+                output += seg  # type: ignore
+        else:
+            output += seg  # type: ignore
+
+        if gi < len(groups) - 1:
+            add_ms = extra_silences[gi]
+            if add_ms > 0:
+                add_ms_q = int(quantize_ms(add_ms, fps))
+                output += AudioSegment.silent(duration=add_ms_q)  # type: ignore
+
+    # Export: ensure WAV 48kHz PCM16 for frame-based validation. MP3 reserved for preview.
+    out_is_mp3 = str(out_path).lower().endswith(".mp3")
+    # Ensure type stability for Pylance: annotate and suppress unknown member type on pydub chain
+    wav_48: AudioSegment = output
+    wav_48 = wav_48.set_frame_rate(48000)  # type: ignore
+    wav_48 = wav_48.set_sample_width(2)  # type: ignore
+
+    if out_is_mp3:
+        # Export preview MP3 as requested by UI
+        try:
+            safe_export(output, out_path, cfg)
+        except Exception:
+            pass
+        # Also export a sibling WAV for precise frame checking
+        from pathlib import Path
+        p = Path(out_path)
+        wav_path = str(p.with_suffix("")) + "_frame.wav"
+        safe_export(wav_48, wav_path, {**cfg, "export_format": "wav"})
+    else:
+        # Direct WAV path: ensure 48kHz
+        safe_export(wav_48, out_path, {**cfg, "export_format": "wav"})
+
+    # Final verification logs for periods
+    for i in range(len(groups) - 1):
+        if puncts[i] == ".":
+            measured = (starts[i + 1] - ends[i]) + extra_silences[i]
+            expected = target_period_ms
+            if abs(measured - expected) > 5:
+                print(f"[WARN] Pause off: expected={expected}ms, measured={measured}ms at junction {i}")
+            else:
+                print(f"[OK] Period pause ~{measured}ms at junction {i}")

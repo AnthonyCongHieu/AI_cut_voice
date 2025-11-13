@@ -6,7 +6,7 @@ from typing import Any, List, Dict
 
 import torch
 from pydub.utils import which
-import stable_whisper
+import faster_whisper
 
 
 FALLBACK_MODELS = [
@@ -38,7 +38,7 @@ def load_model_smart(name: str, device: str) -> Any:
             continue
         try:
             print(f"[aligner] Loading model '{m}' on device '{dev}'...")
-            model = stable_whisper.load_model(m, device=dev)
+            model = faster_whisper.WhisperModel(m, device=dev, compute_type="float16" if dev == "cuda" else "int8")
             print(f"[aligner] Loaded model: {m}")
             return model
         except RuntimeError as e:
@@ -87,15 +87,17 @@ def align_words(
     model = load_model_smart(model_name, device)
     # Bias with initial_prompt if available. condition_on_previous_text=False for determinism.
     try:
-        result = model.transcribe(
+        segments, info = model.transcribe(
             audio_path,
             language=language,
             word_timestamps=True,
             initial_prompt=(transcript or None),
             condition_on_previous_text=False,
-            vad=True,
-            fp16=(used_device == "cuda"),
+            vad_filter=True,
         )
+        segments = list(segments)
+        if not segments:
+            raise ValueError("No segments found")
     except FileNotFoundError as e:
         # Common on Windows when ffmpeg is missing; surface clear guidance
         raise RuntimeError(
@@ -110,7 +112,7 @@ def align_words(
         raise
 
     words: List[Dict[str, float]] = []
-    for seg in result.segments:
+    for seg in segments:
         seg_words = getattr(seg, "words", None)
         if not seg_words:
             # fallback: use segment text as a single word
