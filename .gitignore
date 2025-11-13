@@ -62,3 +62,5 @@ data/outputs/*
 models/*
 !models/.gitkeep
 
+_tmp_input_audio
+_tmp_input_audio
